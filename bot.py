@@ -59,7 +59,13 @@ if not TOKEN:
     print("❌ ОШИБКА: BOT_TOKEN не найден!")
     raise ValueError("❌ BOT_TOKEN не найден! Добавьте переменную в Railway.")
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# Если ADMIN_ID не число, игнорируем его
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+except ValueError:
+    ADMIN_ID = 0
+    print("⚠️ ADMIN_ID не является числом, используем 0")
+
 print(f"✅ TOKEN загружен: {TOKEN[:10]}...")
 print(f"✅ ADMIN_ID: {ADMIN_ID}")
 
@@ -67,6 +73,7 @@ print(f"✅ ADMIN_ID: {ADMIN_ID}")
 class BudgetStates(StatesGroup):
     waiting_for_amount = State()
     waiting_for_category = State()
+    waiting_confirmation = State()
 
 # --- БАЗА ДАННЫХ ---
 print("📊 Инициализация базы данных...")
@@ -258,7 +265,7 @@ def get_daily_limit():
     days = get_days_until_next_payday()
     if days <= 0:
         return balance
-    return round(balance / days, 2) if days > 0 else balance
+    return round(balance / days, 2) if days > 0 else 0
 
 # --- ФУНКЦИИ ДЛЯ ДОСТИЖЕНИЙ ---
 def check_achievements(user_id, username):
@@ -398,7 +405,7 @@ async def show_balance(message: types.Message):
     else:
         text += "📅 Сегодня 5-е или позже. Новый доход еще не поступил."
     
-    if days > 0:
+    if days > 0 and daily_limit > 0:
         cursor.execute('''
             SELECT SUM(amount) FROM transactions
             WHERE type = 'expense' AND date >= datetime('now', 'start of day')
@@ -431,6 +438,18 @@ async def income_start(message: types.Message, state: FSMContext):
 
 @dp.message(BudgetStates.waiting_for_amount)
 async def process_amount(message: types.Message, state: FSMContext):
+    # Проверяем, хочет ли пользователь подтвердить трату
+    if message.text.lower() in ['да', 'yes', 'конечно', 'подтверждаю', '+', 'lf']:
+        data = await state.get_data()
+        if 'pending_amount' in data:
+            amount = data.get('pending_amount')
+            await process_expense(message, state, amount)
+            return
+        else:
+            await message.answer("❌ Нет суммы для подтверждения. Начните заново.")
+            await state.clear()
+            return
+    
     try:
         amount = float(message.text.replace(',', '.').strip())
         if amount <= 0:
@@ -451,24 +470,23 @@ async def process_amount(message: types.Message, state: FSMContext):
         ''')
         today_expense = cursor.fetchone()[0] or 0
         
-        if today_expense + amount > daily_limit * 2:
+        # Проверяем превышение лимита (только если лимит > 0)
+        if daily_limit > 0 and today_expense + amount > daily_limit * 1.5:
+            # Сохраняем сумму для подтверждения
+            await state.update_data(pending_amount=amount)
             await message.answer(
                 f"🚨 *Внимание!*\n"
-                f"Эта трата ({amount:.2f} руб.) превышает ваш дневной лимит ({daily_limit:.2f} руб.) в 2 раза!\n"
+                f"Эта трата ({amount:.2f} руб.) превышает ваш дневной лимит ({daily_limit:.2f} руб.)!\n"
                 f"Сегодня уже потрачено: {today_expense:.2f} руб.\n\n"
-                f"Вы уверены? Если да, введите сумму еще раз."
+                f"Вы уверены, что хотите потратить {amount:.2f} руб.?\n"
+                f"Напишите *да* для подтверждения или введите другую сумму."
             )
             return
         
-        await state.update_data(amount=amount)
-        await state.set_state(BudgetStates.waiting_for_category)
-        await message.answer(
-            f"💸 Сумма: {amount:.2f} руб.\n"
-            f"Выберите категорию расхода:",
-            reply_markup=get_category_keyboard()
-        )
+        # Если лимит не превышен, сразу добавляем
+        await process_expense(message, state, amount)
     
-    else:
+    else:  # income
         new_balance = update_balance(amount)
         add_transaction(
             message.from_user.id,
@@ -488,6 +506,17 @@ async def process_amount(message: types.Message, state: FSMContext):
         
         await state.clear()
         await message.answer(response, reply_markup=get_main_keyboard())
+
+async def process_expense(message: types.Message, state: FSMContext, amount: float):
+    """Обработка расхода с категорией"""
+    # Очищаем pending_amount если был
+    await state.update_data(amount=amount, pending_amount=None)
+    await state.set_state(BudgetStates.waiting_for_category)
+    await message.answer(
+        f"💸 Сумма: {amount:.2f} руб.\n"
+        f"Выберите категорию расхода:",
+        reply_markup=get_category_keyboard()
+    )
 
 @dp.callback_query(BudgetStates.waiting_for_category)
 async def process_category(callback: types.CallbackQuery, state: FSMContext):
@@ -514,16 +543,17 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     response += f"💰 Новый баланс: {new_balance:.2f} руб."
     
     daily_limit = get_daily_limit()
-    cursor.execute('''
-        SELECT SUM(amount) FROM transactions
-        WHERE type = 'expense' AND date >= datetime('now', 'start of day')
-    ''')
-    today_expense = cursor.fetchone()[0] or 0
-    
-    if today_expense > daily_limit:
-        response += f"\n\n⚠️ *Внимание!* Вы превысили дневной лимит на {today_expense - daily_limit:.2f} руб."
-    elif today_expense > daily_limit * 0.8:
-        response += f"\n\n📊 Осталось потратить сегодня: {daily_limit - today_expense:.2f} руб."
+    if daily_limit > 0:
+        cursor.execute('''
+            SELECT SUM(amount) FROM transactions
+            WHERE type = 'expense' AND date >= datetime('now', 'start of day')
+        ''')
+        today_expense = cursor.fetchone()[0] or 0
+        
+        if today_expense > daily_limit:
+            response += f"\n\n⚠️ *Внимание!* Вы превысили дневной лимит на {today_expense - daily_limit:.2f} руб."
+        elif today_expense > daily_limit * 0.8:
+            response += f"\n\n📊 Осталось потратить сегодня: {daily_limit - today_expense:.2f} руб."
     
     if unlocked:
         response += "\n\n🏆 *Новые достижения:*\n" + "\n".join(f"✨ {ach}" for ach in unlocked)
