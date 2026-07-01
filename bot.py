@@ -1,13 +1,45 @@
+import subprocess
+import sys
+import os
+
+# --- АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ ---
+def install_dependencies():
+    """Автоматически устанавливает зависимости при первом запуске"""
+    try:
+        import aiogram
+        import apscheduler
+        print("✅ Все зависимости уже установлены")
+        return True
+    except ImportError as e:
+        print(f"📦 Устанавливаю зависимости: {e}")
+        try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install",
+                "aiogram==3.2.0",
+                "apscheduler==3.10.4",
+                "--no-cache-dir"
+            ])
+            print("✅ Зависимости успешно установлены!")
+            return True
+        except Exception as install_error:
+            print(f"❌ Ошибка установки зависимостей: {install_error}")
+            return False
+
+# Устанавливаем зависимости перед запуском
+if not install_dependencies():
+    print("❌ Не удалось установить зависимости. Бот не запустится.")
+    sys.exit(1)
+
+# Теперь импортируем все остальное
 import sqlite3
 import random
-import os
 import logging
 import asyncio
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -19,6 +51,7 @@ from collections import defaultdict
 # --- ДИАГНОСТИКА ---
 print("🚀 Запуск бота...")
 print(f"📁 Текущая директория: {os.getcwd()}")
+print(f"📁 Python версия: {sys.version}")
 
 # --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 TOKEN = os.getenv("BOT_TOKEN")
